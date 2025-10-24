@@ -1,151 +1,154 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-	<script>
-	(function () {
-	  const sp = new URLSearchParams(location.search);
+
+<script>
+(function () {
+  const sp = new URLSearchParams(location.search);
+
+  // Helpers
+  const safeSplit = (val, count) => {
+    const parts = (val || "").split("|").map(s => s.trim());
+    while (parts.length < count) parts.push("");
+    return parts;
+  };
+  const clean = (v) => {
+    if (v == null) return "";
+    let s = String(v);
+    try { s = decodeURIComponent(s); } catch {}
+    try { s = decodeURIComponent(s); } catch {}
+    return s.replace(/\s+/g, " ").trim();
+  };
+  const first = (...vals) => {
+    for (let v of vals) {
+      v = clean(v);
+      if (v) return v;
+    }
+    return "";
+  };
+
+  // Unpack landing UTMs (if any)
+  const [campIdU, campNameU] = safeSplit(sp.get("utm_campaign"), 2);
+  const [aidU, aidNameU]     = safeSplit(sp.get("utm_medium"), 2);
+  const [cidU, cidNameU]     = safeSplit(sp.get("utm_content"), 2);
+
+  // Your utm_term order: cmpid | xid | cidManual | click_id | placement | csite | ctype
+  const [cmpidTerm, xidTerm, cidManualTerm, clickIdTerm, placementTerm, csiteTerm, ctypeTerm] =
+    safeSplit(sp.get("utm_term"), 7);
+
+  // Canonical values with TikTok macro fallbacks
+  const CAMPAIGN_ID   = first(sp.get("sub2"), campIdU, "__CAMPAIGN_ID__");
+  const AID           = first(sp.get("sub3"), aidU, "__AID__");
+  const CID           = first(sp.get("sub4"), cidU, "__CID__");
+  const PLACEMENT     = first(sp.get("sub5"), placementTerm, "__PLACEMENT__");
+  const CAMPAIGN_NAME = first(sp.get("sub6"), campNameU, "__CAMPAIGN_NAME__");
+  const AID_NAME      = first(sp.get("sub7"), aidNameU, "__AID_NAME__");
+  const CID_NAME      = first(sp.get("sub8"), cidNameU, "__CID_NAME__");
+  const CSITE         = first(sp.get("sub9"), csiteTerm, "__CSITE__");
+  const CTYPE         = first(sp.get("sub10"), ctypeTerm, "__CTYPE__");
+  const CLICKID       = first(sp.get("click_id"), clickIdTerm, "__CALLBACK_PARAM__");
+
+  // Optional manual-only extras
+  const XID   = first(sp.get("xid"), xidTerm);        // we still force xid=wnczvjoe below, but if you pass one we'll use it
+  const CMPID = first(sp.get("cmpid"), cmpidTerm);
+  const CID_EXTRA = first(sp.get("cid"), cidManualTerm);
+
+  // --- Reformulated UTMs for button/link URLs (NOT forwarding as-is) ---
+  const UTM_SOURCE = (sp.get("utm_source") || "TikTok").trim();
+  const UTM_CAMPAIGN = `${CAMPAIGN_NAME}|${CAMPAIGN_ID}`;
+  const UTM_MEDIUM   = `${AID_NAME}|${AID}`;
+  const UTM_CONTENT  = `${CID_NAME}|${CID}`;
+  const UTM_TERM     = `${PLACEMENT}`;
+
+  // Build params: ones we FORCE vs ones we MERGE-IF-MISSING
+  const forceParams = new URLSearchParams();
+  forceParams.set("utm_source",  UTM_SOURCE);
+  forceParams.set("utm_campaign", UTM_CAMPAIGN);
+  forceParams.set("utm_medium",   UTM_MEDIUM);
+  forceParams.set("utm_content",  UTM_CONTENT);
+  forceParams.set("utm_term",     UTM_TERM);
+
+  // second-set exact keys you wanted on every button/link
+  forceParams.set("src", CSITE);
+  forceParams.set("utm_medium", AID_NAME);   // name-only for second set (this intentionally overwrites utm_medium above)
+  forceParams.set("utm_content", CID_NAME);  // name-only for second set (this intentionally overwrites utm_content above)
+  forceParams.set("sku", PLACEMENT);
+  forceParams.set("click_id", CLICKID);
+  forceParams.set("xid", "wnczvjoe");
+  if (XID) forceParams.set("xid", XID); // if you provided one via URL/utm_term, use it instead of the fixed
+
+  // Extras if present
+  if (CMPID)    forceParams.set("cmpid", CMPID);
+  if (CID_EXTRA) forceParams.set("cid", CID_EXTRA);
+
+  // RedTrack set (merge only if missing to avoid clobbering dest params)
+  const mergeParams = new URLSearchParams();
+  mergeParams.set("sub2",  CAMPAIGN_ID);
+  mergeParams.set("sub3",  AID);
+  mergeParams.set("sub4",  CID);
+  mergeParams.set("sub5",  PLACEMENT);
+  mergeParams.set("sub6",  CAMPAIGN_NAME);
+  mergeParams.set("sub7",  AID_NAME);
+  mergeParams.set("sub8",  CID_NAME);
+  mergeParams.set("sub9",  CSITE);
+  mergeParams.set("sub10", CTYPE);
+  mergeParams.set("ref_id", CLICKID);
+  mergeParams.set("sku", PLACEMENT); // harmless duplicate of sku, but merge logic prevents overwrite
+  mergeParams.set("click_id", CLICKID);
+
+  const applyToUrl = (href) => {
+    try {
+      const url = new URL(href, location.origin);
+      const q = new URLSearchParams(url.search);
+
+      // 1) merge RedTrack if missing
+      for (const [k, v] of mergeParams.entries()) if (!q.has(k)) q.set(k, v);
+
+      // 2) force the reformatted UTMs + second set to the exact values
+      for (const [k, v] of forceParams.entries()) q.set(k, v);
+
+      // preserve pipe visually (optional); functionally it’s fine either way
+      const raw = Array.from(q.entries())
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v).replace(/%7C/g, "|")}`)
+        .join("&");
+      url.search = raw;
+
+      return url.toString();
+    } catch { return href; }
+  };
+
+  const patchLinks = (root=document) => {
+    root.querySelectorAll('a[href], button[href], button[data-href]').forEach(el => {
+      const attr = el.hasAttribute('href') ? 'href' : 'data-href';
+      const oldUrl = el.getAttribute(attr);
+      if (!oldUrl) return;
+      const newUrl = applyToUrl(oldUrl);
+      if (newUrl !== oldUrl) el.setAttribute(attr, newUrl);
+    });
+  };
+
+  const onReady = () => {
+    patchLinks(document);
+    const obs = new MutationObserver(muts => {
+      for (const m of muts) {
+        if (m.type === "childList") {
+          m.addedNodes.forEach(n => { if (n.nodeType === 1) patchLinks(n); });
+        } else if (m.type === "attributes" && (m.attributeName === "href" || m.attributeName === "data-href")) {
+          patchLinks(m.target);
+        }
+      }
+    });
+    obs.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ["href","data-href"]
+    });
+  };
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", onReady);
+  else onReady();
+})();
+</script>
+
 	
-	  // Helpers
-	  const safeSplit = (val, count) => {
-	    const parts = (val || "").split("|").map(s => s.trim());
-	    while (parts.length < count) parts.push("");
-	    return parts;
-	  };
-	  const clean = (v) => {
-	    if (v == null) return "";
-	    let s = String(v);
-	    try { s = decodeURIComponent(s); } catch {}
-	    try { s = decodeURIComponent(s); } catch {}
-	    return s.replace(/\s+/g, " ").trim();
-	  };
-	  const first = (...vals) => {
-	    for (let v of vals) {
-	      v = clean(v);
-	      if (v) return v;
-	    }
-	    return "";
-	  };
-	
-	  // Unpack landing UTMs (if any)
-	  const [campIdU, campNameU] = safeSplit(sp.get("utm_campaign"), 2);
-	  const [aidU, aidNameU]     = safeSplit(sp.get("utm_medium"), 2);
-	  const [cidU, cidNameU]     = safeSplit(sp.get("utm_content"), 2);
-	
-	  // Your utm_term order: cmpid | xid | cidManual | click_id | placement | csite | ctype
-	  const [cmpidTerm, xidTerm, cidManualTerm, clickIdTerm, placementTerm, csiteTerm, ctypeTerm] =
-	    safeSplit(sp.get("utm_term"), 7);
-	
-	  // Canonical values with TikTok macro fallbacks
-	  const CAMPAIGN_ID   = first(sp.get("sub2"), campIdU, "_CAMPAIGN_ID_");
-	  const AID           = first(sp.get("sub3"), aidU, "_AID_");
-	  const CID           = first(sp.get("sub4"), cidU, "_CID_");
-	  const PLACEMENT     = first(sp.get("sub5"), placementTerm, "_PLACEMENT_");
-	  const CAMPAIGN_NAME = first(sp.get("sub6"), campNameU, "_CAMPAIGN_NAME_");
-	  const AID_NAME      = first(sp.get("sub7"), aidNameU, "_AID_NAME_");
-	  const CID_NAME      = first(sp.get("sub8"), cidNameU, "_CID_NAME_");
-	  const CSITE         = first(sp.get("sub9"), csiteTerm, "_CSITE_");
-	  const CTYPE         = first(sp.get("sub10"), ctypeTerm, "_CTYPE_");
-	  const CLICKID       = first(sp.get("click_id"), clickIdTerm, "_CALLBACK_PARAM_");
-	
-	  // Optional manual-only extras
-	  const XID   = first(sp.get("xid"), xidTerm);        // we still force xid=wnczvjoe below, but if you pass one we'll use it
-	  const CMPID = first(sp.get("cmpid"), cmpidTerm);
-	  const CID_EXTRA = first(sp.get("cid"), cidManualTerm);
-	
-	  // --- Reformulated UTMs for button/link URLs (NOT forwarding as-is) ---
-	  const UTM_SOURCE = (sp.get("utm_source") || "TikTok").trim();
-	  const UTM_CAMPAIGN = ${CAMPAIGN_NAME}|${CAMPAIGN_ID};
-	  const UTM_MEDIUM   = ${AID_NAME}|${AID};
-	  const UTM_CONTENT  = ${CID_NAME}|${CID};
-	  const UTM_TERM     = ${PLACEMENT};
-	
-	  // Build params: ones we FORCE vs ones we MERGE-IF-MISSING
-	  const forceParams = new URLSearchParams();
-	  forceParams.set("utm_source",  UTM_SOURCE);
-	  forceParams.set("utm_campaign", UTM_CAMPAIGN);
-	  forceParams.set("utm_medium",   UTM_MEDIUM);
-	  forceParams.set("utm_content",  UTM_CONTENT);
-	  forceParams.set("utm_term",     UTM_TERM);
-	
-	  // second-set exact keys you wanted on every button/link
-	  forceParams.set("src", CSITE);
-	  forceParams.set("utm_medium", AID_NAME);   // name-only for second set (this intentionally overwrites utm_medium above)
-	  forceParams.set("utm_content", CID_NAME);  // name-only for second set (this intentionally overwrites utm_content above)
-	  forceParams.set("sku", PLACEMENT);
-	  forceParams.set("click_id", CLICKID);
-	  forceParams.set("xid", "wnczvjoe");
-	  if (XID) forceParams.set("xid", XID); // if you provided one via URL/utm_term, use it instead of the fixed
-	
-	  // Extras if present
-	  if (CMPID)    forceParams.set("cmpid", CMPID);
-	  if (CID_EXTRA) forceParams.set("cid", CID_EXTRA);
-	
-	  // RedTrack set (merge only if missing to avoid clobbering dest params)
-	  const mergeParams = new URLSearchParams();
-	  mergeParams.set("sub2",  CAMPAIGN_ID);
-	  mergeParams.set("sub3",  AID);
-	  mergeParams.set("sub4",  CID);
-	  mergeParams.set("sub5",  PLACEMENT);
-	  mergeParams.set("sub6",  CAMPAIGN_NAME);
-	  mergeParams.set("sub7",  AID_NAME);
-	  mergeParams.set("sub8",  CID_NAME);
-	  mergeParams.set("sub9",  CSITE);
-	  mergeParams.set("sub10", CTYPE);
-	  mergeParams.set("ref_id", CLICKID);
-	  mergeParams.set("sku", PLACEMENT); // harmless duplicate of sku, but merge logic prevents overwrite
-	  mergeParams.set("click_id", CLICKID);
-	
-	  const applyToUrl = (href) => {
-	    try {
-	      const url = new URL(href, location.origin);
-	      const q = new URLSearchParams(url.search);
-	
-	      // 1) merge RedTrack if missing
-	      for (const [k, v] of mergeParams.entries()) if (!q.has(k)) q.set(k, v);
-	
-	      // 2) force the reformatted UTMs + second set to the exact values
-	      for (const [k, v] of forceParams.entries()) q.set(k, v);
-	
-	      // preserve pipe visually (optional); functionally it’s fine either way
-	      const raw = Array.from(q.entries())
-	        .map(([k, v]) => ${encodeURIComponent(k)}=${encodeURIComponent(v).replace(/%7C/g, "|")})
-	        .join("&");
-	      url.search = raw;
-	
-	      return url.toString();
-	    } catch { return href; }
-	  };
-	
-	  const patchLinks = (root=document) => {
-	    root.querySelectorAll('a[href], button[href], button[data-href]').forEach(el => {
-	      const attr = el.hasAttribute('href') ? 'href' : 'data-href';
-	      const oldUrl = el.getAttribute(attr);
-	      if (!oldUrl) return;
-	      const newUrl = applyToUrl(oldUrl);
-	      if (newUrl !== oldUrl) el.setAttribute(attr, newUrl);
-	    });
-	  };
-	
-	  const onReady = () => {
-	    patchLinks(document);
-	    const obs = new MutationObserver(muts => {
-	      for (const m of muts) {
-	        if (m.type === "childList") {
-	          m.addedNodes.forEach(n => { if (n.nodeType === 1) patchLinks(n); });
-	        } else if (m.type === "attributes" && (m.attributeName === "href" || m.attributeName === "data-href")) {
-	          patchLinks(m.target);
-	        }
-	      }
-	    });
-	    obs.observe(document.documentElement, {
-	      childList: true, subtree: true, attributes: true, attributeFilter: ["href","data-href"]
-	    });
-	  };
-	
-	  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", onReady);
-	  else onReady();
-	})();
-	</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PAGE</title>
@@ -203,4 +206,5 @@
 </body>
 
 </html>
+
 
